@@ -17,6 +17,7 @@ import logging
 import re
 import platform
 import defusedxml.ElementTree as ElementTree
+from xml.etree import ElementTree as Et
 import requests
 from requests.adapters import HTTPAdapter, DEFAULT_POOLSIZE, DEFAULT_RETRIES, DEFAULT_POOLBLOCK
 from urllib3.poolmanager import PoolManager, proxy_from_url
@@ -123,12 +124,16 @@ class Response():
 
 def quote(value):
     """ Quote value if needed """
-    if value and type(value) == str and ' ' in value:
-        return '"' + value + '"'
+    try:
+        if value and (type(value) == str or type(value) == unicode) and ' ' in value:
+            return '"' + value + '"'
+    except:
+        # in python3 unicode class doesn't exists
+        pass
     return value
 
 def format_output(output):
-    """ Format command output in ini/section format"""
+    """ Format command output in ini/section or text format"""
     nws_node = ElementTree.fromstring(output)
     serverd_node = nws_node[0]
     ini = '{} code={} msg="{}"'.format(serverd_node.get('ret'),
@@ -161,6 +166,9 @@ def format_output(output):
                 ini += '[{}]\n'.format(section_node.get('title'))
                 for line_node in section_node:
                     ini += "{}\n".format(line_node.text)
+        elif node_format == 'xml':
+            # display xml data node
+            ini += Et.tostring(data_node).decode() + "\n"
         serverd_node = nws_node[1]
         ini += '{} code={} msg="{}"'.format(serverd_node.get('ret'),
                                             serverd_node.get('code'),
@@ -260,7 +268,7 @@ class SSLClient:
 
     def __init__(self, user='admin', password=None, host=None, ip=None, port=443, cabundle=None,
                  sslverifypeer=True, sslverifyhost=True, credentials=None,
-                 usercert=None, autoconnect=True, proxy=None):
+                 usercert=None, autoconnect=True, proxy=None, timeout=None):
         """:class:`SSLclient <SSLClient>` constructor.
 
         :param user: Optional user name.
@@ -275,6 +283,7 @@ class SSLClient:
         :param usercert: Optional user certificate.
         :param autoconnect: Connect to the appliance at initialization
         :param proxy: https proxy url (socks5://user:pass@host:port  http://user:password@host/)
+        :param timeout: connection and read timeout in seconds
         """
 
         self.user = user
@@ -295,6 +304,7 @@ class SSLClient:
         self.dl_crc = ""
         self.autoconnect = autoconnect
         self.proxy = proxy
+        self.conn_options = {}
 
         if host is None:
             raise MissingHost("Host parameter must be provided")
@@ -347,6 +357,9 @@ class SSLClient:
         if self.proxy:
             self.session.proxies = { "https": self.proxy}
 
+        if timeout is not None:
+            self.conn_options = { "timeout": timeout }
+
         self.logger = logging.getLogger()
 
         if self.autoconnect:
@@ -368,7 +381,7 @@ class SSLClient:
             # user cert authentication
             request = self.session.get(
                 self.baseurl + '/auth/admin.html?sslcert=1&app={}'.format(self.app),
-                headers=self.headers)
+                headers=self.headers, **self.conn_options)
         else:
             # password authentication
             request = self.session.post(
@@ -377,7 +390,8 @@ class SSLClient:
                     'uid':base64.b64encode(self.user.encode('utf-8')),
                     'pswd':base64.b64encode(self.password.encode('utf-8')),
                     'app':self.app},
-                headers=self.headers)
+                headers=self.headers,
+                **self.conn_options)
 
         self.logger.log(logging.DEBUG, request.text)
 
@@ -397,7 +411,8 @@ class SSLClient:
         request = self.session.post(
             self.baseurl + '/api/auth/login',
             data=data,
-            headers=self.headers)
+            headers=self.headers,
+            **self.conn_options)
 
         self.logger.log(logging.DEBUG, request.text)
 
@@ -427,7 +442,7 @@ class SSLClient:
 
         request = self.session.get(
             self.baseurl + '/api/auth/logout?sessionid=' + self.sessionid,
-            headers=self.headers)
+            headers=self.headers, **self.conn_options)
 
         if request.status_code == requests.codes.OK:
             self.logger.log(logging.INFO, 'Disconnected from %s', self.host)
@@ -465,7 +480,7 @@ class SSLClient:
         request = self.session.get(
             self.baseurl + '/api/command?sessionid=' + self.sessionid +
             '&cmd=' + requests.compat.quote(command.encode('utf-8')), # manually done since we need %20 encoding
-            headers=self.headers)
+            headers=self.headers,  **self.conn_options)
 
         self.logger.log(logging.DEBUG, request.text)
 
@@ -498,10 +513,18 @@ class SSLClient:
                     return response
 
                 if serverd_code == self.SERVERD_WAIT_DOWNLOAD:
-                    # keep size and crc for further verification
                     data = serverd.find('data')
-                    self.dl_size = int(data.find('size').text)
-                    self.dl_crc = data.find('crc').text
+                    # keep size and crc for further verification
+                    if data.get('format') == 'section':
+                        # <data format="section"><section title="Result"><key name="format" value="base64,crc=923B2C86,size=952"/>
+                        key = data.find('section').find('key')
+                        values = key.get('value').split(',')
+                        self.dl_size = int(values[2].split('=')[1])
+                        self.dl_crc = values[1].split('=')[1]
+                    else:
+                        # <data format="raw"><crc>439B852</crc><size>5096
+                        self.dl_size = int(data.find('size').text)
+                        self.dl_crc = data.find('crc').text
                     if filename:
                         return self.download(filename)
                     return response
@@ -516,7 +539,8 @@ class SSLClient:
         request = self.session.get(
             self.baseurl + '/api/download/tmp.file?sessionid=' + self.sessionid,
             headers=self.headers,
-            stream=True)
+            stream=True,
+            **self.conn_options)
 
         if request.status_code == requests.codes.OK:
             size = 0
@@ -561,7 +585,8 @@ class SSLClient:
         request = self.session.post(
             self.baseurl + '/api/upload?sessionid=' + self.sessionid,
             headers=headers,
-            data=data)
+            data=data,
+            **self.conn_options)
 
         uploadh.close()
 

@@ -60,7 +60,7 @@ class ConfigParser:
 
         text = "\n".join(lines)
 
-        if self.format == 'raw':
+        if self.format == 'raw' or self.format == 'xml':
             # plain data, no parsing
             self.data = text
             return
@@ -94,7 +94,7 @@ class ConfigParser:
                     line = line.encode('utf-8')
                 # parse token=value token2=value2
                 lexer = shlex(line, posix=True)
-                lexer.wordchars += "=.-*:,/"
+                lexer.wordchars += "=.-*:,/@"
                 parsed = {}
                 for word in lexer:
                     # ignore anything else than token=value
